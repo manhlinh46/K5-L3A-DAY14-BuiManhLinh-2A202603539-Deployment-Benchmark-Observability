@@ -1,4 +1,6 @@
-# Secrets — không bao giờ đưa vào image
+# ASCII only: some remote builders (Railway) send these patterns in an HTTP header.
+
+# Secrets - never ship into the image
 .env
 .env.*
 !.env.example
@@ -14,7 +16,7 @@ venv/
 .venv/
 env/
 
-# Git, IDE, tài liệu, Part 7, script chấm — không cần để chạy app
+# Git, IDE, docs, Part 7, grading script - not needed at runtime
 .git/
 .gitignore
 .vscode/

@@ -182,25 +182,55 @@ Quan sát:
 
 > Theo CHECKPOINTS (K5), Part 3 deploy luôn agent Part 6 (CP6).
 
-### Exercise 3.1 / 3.2: Deploy nền tảng chính
+### Exercise 3.1: Deploy Railway (nền tảng chính)
 
-- Platform: _TODO (Railway / Render)_
-- URL: _TODO_
-- Kết quả 4 lệnh tự kiểm (CP6):
+- **Platform:** Railway, project `lab14`, 2 service: `agent` (Dockerfile của `06-lab-complete/`) + `Redis` (Railway Database)
+- **URL:** https://agent-production-707915a9.up.railway.app
+- **Biến môi trường** (đặt trên Railway, không ghi trong code): `AGENT_API_KEY`, `REDIS_URL=${{Redis.REDIS_URL}}`, `ENVIRONMENT=production`, `RATE_LIMIT_PER_MINUTE=10`, `DAILY_BUDGET_USD=1.0`; `PORT` do Railway cấp.
+- **Kết quả 4 lệnh tự kiểm (CP6)**, chạy 3 vòng liên tiếp:
 
 ```
-TODO: /health → 200, /ready → 200, /ask không key → 401, /ask có key → 200
+round 1: health=200 ready=200 nokey=401 key=200
+round 2: health=200 ready=200 nokey=401 key=200
+round 3: health=200 ready=200 nokey=401 key=200
+
+$ curl $BASE/ready
+{"ready":true,"redis":"ok"}
+$ curl -X POST $BASE/ask -H "X-API-Key: ***" -H "Content-Type: application/json" -d '{"question":"What is deployment?"}'
+{"question":"What is deployment?","answer":"Deployment là quá trình đưa code từ máy bạn lên server để người khác dùng được.","usage":{"input_tokens":4,"output_tokens":21,"cost_usd":1.32e-05}}
+
+$ python check_production_ready.py --public-url https://agent-production-707915a9.up.railway.app
+✅ Public URL: GET https://agent-production-707915a9.up.railway.app/health → 200
 ```
 
-- Screenshot: `screenshots/dashboard.png`, `screenshots/running.png`, `screenshots/test.png`
+- **Screenshot:** `screenshots/dashboard.png`, `screenshots/running.png`, `screenshots/test.png`
+- **Sự cố gặp phải** (chi tiết trong `DEPLOYMENT.md`):
+  1. `railway.exe` bị Windows Application Control chặn → dùng CLI bản Linux trong WSL.
+  2. `railway add --database redis` tự link thư mục với Redis → `railway up` deploy nhầm lên service Redis → tạo service `agent` riêng, `railway service agent` trước khi deploy.
+  3. Build fail `header key "exclude-patterns" contains value with non-printable ASCII characters`: builder từ xa của Railway gửi pattern `.dockerignore` qua header gRPC (chỉ nhận ASCII), mà các file ignore có comment tiếng Việt có dấu → chuyển comment sang ASCII và deploy từ một thư mục sạch (`railway up <dir> --path-as-root`). Docker local không báo lỗi này vì không đi qua header.
 
-### So sánh `railway.toml` và `render.yaml`
+### So sánh `railway.toml` và `render.yaml` (nền tảng còn lại)
 
-_TODO_
+| Khía cạnh | `railway.toml` | `render.yaml` |
+|---|---|---|
+| Phạm vi | Cấu hình **một service** (build + deploy) | **Blueprint** mô tả cả hạ tầng: web service + Redis (`keyvalue`) trong một file |
+| Build | `[build] builder = "DOCKERFILE"`, `dockerfilePath` | `runtime: docker`, `dockerfilePath`, `rootDir: 06-lab-complete` |
+| Health check | `[deploy] healthcheckPath = "/health"`, `healthcheckTimeout` | `healthCheckPath: /health` |
+| Restart | `restartPolicyType = "ON_FAILURE"`, `restartPolicyMaxRetries` | Render tự restart khi health check fail |
+| Secret | **Không** khai báo trong file; đặt bằng `railway variables` / dashboard | Khai báo tên biến trong file nhưng giá trị dùng `generateValue: true` (Render tự sinh) hoặc `sync: false` (nhập tay trên dashboard) |
+| Redis | Tạo riêng (`railway add --database redis`), nối bằng biến tham chiếu `${{Redis.REDIS_URL}}` | Khai báo service `type: keyvalue` ngay trong blueprint, nối bằng `fromService: {type: keyvalue, property: connectionString}` |
+| Vị trí file | Đặt trong thư mục deploy (`06-lab-complete/`) | Render chỉ đọc `render.yaml` ở **gốc repo** → phải copy ra gốc và dùng `rootDir` |
+| PORT | Railway cấp `PORT`, app nghe theo `${PORT:-8000}` | Render cũng cấp `PORT` (mặc định 10000), cùng cơ chế |
 
-### Exercise 3.3: Cloud Run CI/CD pipeline
+Vì sao khác: Railway coi project là tập service tạo bằng CLI/dashboard, file toml chỉ ghi đè cách build/deploy của một service; Render theo hướng "infrastructure as code", một blueprint dựng lại được toàn bộ stack (kể cả DB và secret tự sinh) từ repo. Cả hai đều không ghi giá trị secret vào git.
 
-_TODO: 3–5 dòng mô tả các bước trong `cloudbuild.yaml` và `service.yaml`_
+### Exercise 3.3: Cloud Run CI/CD pipeline (`03-cloud-deployment/production-cloud-run/`)
+
+1. **Trigger → test:** mỗi lần push, Cloud Build chạy step `test` trong image `python:3.11-slim`: cài `requirements.txt` + pytest rồi chạy `pytest tests/`; test fail thì pipeline dừng, không build.
+2. **Build:** step `build` (`waitFor: [test]`) build Docker image, gắn 2 tag `gcr.io/$PROJECT_ID/ai-agent:$COMMIT_SHA` và `:latest`, dùng `--cache-from :latest` để tận dụng layer cache.
+3. **Push:** step `push` đẩy cả 2 tag lên Container Registry; tag theo commit SHA giúp biết chính xác bản nào đang chạy và rollback được.
+4. **Deploy:** step `deploy` chạy `gcloud run deploy ai-agent --image ...:$COMMIT_SHA` ở `asia-southeast1`, public (`--allow-unauthenticated`), autoscale 1–10 instance, 512Mi / 1 CPU, timeout 60 s, `ENVIRONMENT=production`, secret lấy từ **Secret Manager** (`--set-secrets`), không nằm trong code.
+5. **`service.yaml`** mô tả cùng service theo dạng khai báo (Knative): `minScale: 1` để tránh cold start, `maxScale: 10`, `containerConcurrency: 80`, `AGENT_API_KEY`/`OPENAI_API_KEY` qua `secretKeyRef`, `livenessProbe` gọi `/health` (fail → restart) và `startupProbe` gọi `/ready` (chưa sẵn sàng → chưa nhận traffic).
 
 ---
 
@@ -474,4 +504,5 @@ Một số chi tiết từ output đầy đủ: image **273 MB**, build 40 s; ra
 | Part 4 | Dựng lại 2 terminal, soạn lệnh test 401/403/200/429 | Lệnh curl + vòng lặp; chỉ ra bug `budget_remaining_usd` | Tự chạy, tự che token, đối chiếu với code |
 | Part 5 | Soạn lệnh test 5.1–5.5, vì sao lần đầu gọi nhầm app | Phát hiện app Part 4 còn chiếm cổng 8000; lệnh test graceful shutdown trên 1 dòng | Tự chạy lại, đối chiếu log server/client |
 | Format | Định dạng lại file `MISSION_ANSWERS.md` | Bố cục theo mẫu checklist, gom output vào code block | Tự rà lại nội dung và số liệu |
+| Part 3 / CP6 | Deploy agent Part 6 lên Railway, xử lý lỗi | Chẩn đoán `railway.exe` bị Application Control chặn, service Redis bị deploy nhầm, lỗi `exclude-patterns` non-ASCII; soạn `DEPLOYMENT.md`, so sánh `railway.toml`/`render.yaml`, mô tả pipeline Cloud Run | Tự đăng nhập Railway, tạo key cloud (lưu ngoài repo), chạy 4 lệnh tự kiểm 3 vòng, chạy lại grader đầy đủ → vẫn PASS 12/12 |
 | Part 6 | Viết code cho các TODO trong `06-lab-complete/` theo hợp đồng của script chấm | Code `config/auth/redis_client/rate_limiter/cost_guard/main`, Dockerfile, compose, `.dockerignore`, `.env.example`, `railway.toml`, `render.yaml` | Đọc hiểu từng file, chạy `check_production_ready.py` bản đầy đủ → PASS 12/12, tự test tay bằng `docker compose up` |
