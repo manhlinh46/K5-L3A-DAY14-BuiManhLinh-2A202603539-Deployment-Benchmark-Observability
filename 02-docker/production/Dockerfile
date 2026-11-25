@@ -18,7 +18,9 @@ FROM python:3.11-slim AS builder
 WORKDIR /app
 
 # Cài build dependencies (cần cho một số packages như numpy)
-RUN apt-get update && apt-get install -y \
+# (Sửa: mạng chặn HTTP cổng 80 → chuyển apt sang HTTPS)
+RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources \
+    && apt-get update && apt-get install -y \
     gcc \
     libpq-dev \
     && rm -rf /var/lib/apt/lists/*
